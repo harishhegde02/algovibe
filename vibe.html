@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-R" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LOTR Danger Path Finder</title>
+    <!-- 1. Load Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 2. Load D3.js for visualization -->
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        /* Custom styles for the D3 graph */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .link {
+            stroke: #999;
+            stroke-opacity: 0.6;
+            stroke-width: 2px;
+            transition: all 0.3s ease;
+        }
+        .link-label {
+            fill: #ccc;
+            font-size: 10px;
+            text-anchor: middle;
+            dominant-baseline: middle;
+        }
+        .node {
+            stroke: #fff;
+            stroke-width: 1.5px;
+            transition: all 0.3s ease;
+        }
+        .node-label {
+            fill: #fff;
+            font-size: 12px;
+            font-weight: bold;
+            text-anchor: middle;
+            dominant-baseline: central;
+            pointer-events: none; /* So nodes are still draggable */
+        }
+        /* Highlight styles */
+        .link.path {
+            stroke: #f59e0b; /* Amber */
+            stroke-opacity: 1;
+            stroke-width: 4px;
+        }
+        .link.max-danger {
+            stroke: #ef4444; /* Red */
+            stroke-opacity: 1;
+            stroke-width: 6px;
+        }
+        .node.path-node {
+            fill: #f59e0b;
+            r: 8;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 min-h-screen p-4 md:p-8">
+    <div class="max-w-7xl mx-auto">
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-bold text-white">LOTR Danger Path Finder</h1>
+            <p class="text-lg text-gray-400">Find the scariest segment on your journey through Middle-earth.</p>
+        </header>
+
+        <!-- Main content grid: Controls on left, Visualization on right -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+
+            <!-- Left Panel: Controls & Results -->
+            <div class="bg-gray-800 p-6 rounded-lg shadow-lg">
+                <h2 class="text-2xl font-semibold mb-4 text-white">1. Define Your Map</h2>
+                <p class="text-gray-400 mb-2">Enter your `n-1` edges. Format: `u v w` (node1 node2 danger)</p>
+                <textarea id="edges-input" class="w-full h-48 bg-gray-900 text-gray-200 p-3 rounded-md border border-gray-700 focus:ring-2 focus:ring-amber-500 focus:border-amber-500 resize-none" placeholder="1 2 5
+1 3 10
+2 4 3
+2 5 8
+3 6 12
+..."></textarea>
+
+                <h2 class="text-2xl font-semibold mt-6 mb-4 text-white">2. Plan Your Journeys</h2>
+                <p class="text-gray-400 mb-2">Enter your query paths. Format: `start end`</p>
+                <textarea id="queries-input" class="w-full h-32 bg-gray-900 text-gray-200 p-3 rounded-md border border-gray-700 focus:ring-2 focus:ring-amber-500 focus:border-amber-500 resize-none" placeholder="4 6
+5 1
+..."></textarea>
+
+                <button id="run-button" class="w-full bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 px-6 rounded-lg shadow-md transition duration-300 mt-6">
+                    Build Tree & Find Scariest Paths
+                </button>
+
+                <h2 class="text-2xl font-semibold mt-8 mb-4 text-white">3. Journey Results</h2>
+                <div id="results-output" class="bg-gray-900 p-4 rounded-md border border-gray-700 h-48 overflow-y-auto">
+                    <p class="text-gray-500">Your path results will appear here...</p>
+                </div>
+            </div>
+
+            <!-- Right Panel: Visualization -->
+            <div class="bg-gray-800 p-6 rounded-lg shadow-lg min-h-[600px] flex flex-col">
+                <h2 class="text-2xl font-semibold mb-4 text-white text-center">Middle-earth Map</h2>
+                <div id="visualization" class="w-full flex-grow bg-gray-900 rounded-md border border-gray-700 relative">
+                    <!-- SVG for D3 will be appended here -->
+                    <div id="legend" class="absolute top-2 left-2 p-3 bg-gray-800 bg-opacity-80 rounded-md text-xs">
+                        <div class="flex items-center mb-1">
+                            <div class="w-4 h-1 bg-amber-500 mr-2"></div>
+                            <span>Queried Path</span>
+                        </div>
+                        <div class="flex items-center">
+                            <div class="w-4 h-1 bg-red-500 mr-2 border-y border-red-500"></div>
+                            <span>Max Danger Segment</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 3. Main JavaScript Logic -->
+    <script>
+        // --- Global Variables ---
+        const MAX_NODES = 200005; // Max nodes as specified in C++
+        const LOGN = 20; // Max log(nodes)
+        
+        // Algorithm data structures
+        let adj, depth, parent, max_up, edge_map;
+        let nodeCount = 0; // Number of nodes - Renamed from 'n' to avoid potential global conflict
+
+        // D3 Visualization objects
+        let svg, simulation, linkG, nodeG, labelG;
+        let visNodes = [];
+        let visLinks = [];
+
+        // --- DOM Elements ---
+        const edgesInput = document.getElementById('edges-input');
+        const queriesInput = document.getElementById('queries-input');
+        const runButton = document.getElementById('run-button');
+        const resultsOutput = document.getElementById('results-output');
+        const vizContainer = document.getElementById('visualization');
+
+        // --- Initialization ---
+        runButton.addEventListener('click', handleRun);
+        initVisualization();
+
+        /**
+         * @brief Main function to handle the button click
+         */
+        function handleRun() {
+            try {
+                // --- Validation Step ---
+                const edgesText = edgesInput.value.trim();
+                if (!edgesText) {
+                    resultsOutput.innerHTML = '<p class="text-amber-400">Please define your map (edges) first.</p>';
+                    return; // Stop execution, no error thrown
+                }
+                // --- End Validation Step ---
+
+                resultsOutput.innerHTML = '<p class="text-gray-300">Building tree and processing paths...</p>';
+                
+                // 1. Parse Input & Build Graph
+                parseInput();
+                
+                // 2. Run Precomputation
+                precompute();
+                
+                // 3. Process Queries
+                processQueries();
+                
+                // 4. Draw D3 Graph
+                drawTree();
+
+            } catch (error) {
+                console.error("Error processing:", error);
+                resultsOutput.innerHTML = `<p class="text-red-400">Error: ${error.message}</p>`;
+            }
+        }
+
+        /**
+         * @brief Parses edge and query inputs, builds adjacency list
+         */
+        function parseInput() {
+            // Reset algorithm structures
+            adj = Array(MAX_NODES).fill(null).map(() => []);
+            depth = Array(MAX_NODES).fill(0);
+            parent = Array(MAX_NODES).fill(null).map(() => Array(LOGN).fill(0));
+            max_up = Array(MAX_NODES).fill(null).map(() => Array(LOGN).fill(0));
+            
+            // Stores danger by edge for pathfinding, e.g., "1-2" -> 5
+            edge_map = new Map();
+
+            // Reset visualization structures
+            visNodes = [];
+            visLinks = [];
+            
+            const nodeSet = new Set();
+            const edgesText = edgesInput.value.trim();
+            
+            // This check is now handled gracefully in handleRun()
+            // if (!edgesText) {
+            //     throw new Error("Edge input is empty.");
+            // }
+
+            const edgeLines = edgesText.split('\n');
+            
+            edgeLines.forEach(line => {
+                const parts = line.trim().split(/\s+/).map(Number);
+                if (parts.length !== 3 || parts.some(isNaN)) {
+                    throw new Error(`Invalid edge format: "${line}"`);
+                }
+                const [u, v, w] = parts;
+
+                adj[u].push({ node: v, danger: w });
+                adj[v].push({ node: u, danger: w });
+
+                nodeSet.add(u);
+                nodeSet.add(v);
+                
+                // Store for D3
+                visLinks.push({ source: u.toString(), target: v.toString(), danger: w });
+                
+                // Store for path lookup
+                edge_map.set(`${u}-${v}`, w);
+                edge_map.set(`${v}-${u}`, w);
+            });
+
+            nodeCount = Math.max(...Array.from(nodeSet)); // Use nodeCount
+            if (nodeCount === 0) throw new Error("No nodes found."); // Use nodeCount
+
+            // Create node list for D3
+            for (let i = 1; i <= nodeCount; i++) { // Use nodeCount
+                if(nodeSet.has(i)) {
+                     visNodes.push({ id: i.toString() });
+                }
+            }
+        }
+
+        /**
+         * @brief Runs DFS and Binary Lifting precomputation
+         */
+        function precompute() {
+            // 1. Run DFS from root (node 1)
+            // dfs(u, p, d, w)
+            dfs(1, 0, 0, 0);
+
+            // 2. Run Binary Lifting DP
+            for (let j = 1; j < LOGN; j++) {
+                for (let i = 1; i <= nodeCount; i++) { // Use nodeCount
+                    const ancestor = parent[i][j - 1];
+                    if (ancestor !== 0) {
+                        parent[i][j] = parent[ancestor][j - 1];
+                        max_up[i][j] = Math.max(max_up[i][j - 1], max_up[ancestor][j - 1]);
+                    }
+                }
+            }
+        }
+
+        /**
+         * @brief Recursive DFS for precomputation
+         */
+        function dfs(u, p, d, w) {
+            depth[u] = d;
+            parent[u][0] = p;
+            max_up[u][0] = w;
+
+            for (const edge of adj[u]) {
+                const v = edge.node;
+                if (v !== p) {
+                    dfs(v, u, d + 1, edge.danger);
+                }
+            }
+        }
+        
+        /**
+         * @brief Finds the Lowest Common Ancestor (LCA) of nodes u and v
+         */
+        function getLCA(u, v) {
+            // Ensure u is deeper
+            if (depth[u] < depth[v]) {
+                [u, v] = [v, u]; // Swap
+            }
+
+            // 1. Lift u to the same depth as v
+            for (let j = LOGN - 1; j >= 0; j--) {
+                if (depth[u] - (1 << j) >= depth[v]) {
+                    u = parent[u][j];
+                }
+            }
+
+            // 2. If v was an ancestor of u
+            if (u === v) {
+                return u;
+            }
+
+            // 3. Lift u and v together
+            for (let j = LOGN - 1; j >= 0; j--) {
+                if (parent[u][j] !== 0 && parent[u][j] !== parent[v][j]) {
+                    u = parent[u][j];
+                    v = parent[v][j];
+                }
+            }
+
+            // 4. The LCA is the direct parent
+            return parent[u][0];
+        }
+
+        /**
+         * @brief Finds the max danger on path (u, v) in O(logN) using binary lifting
+         */
+        function getMaxDanger(u, v) {
+            let maxDanger = 0;
+
+            // 1. Ensure u is the deeper node
+            if (depth[u] < depth[v]) {
+                [u, v] = [v, u]; // Swap
+            }
+
+            // 2. Lift u up to the same depth as v, tracking max danger
+            for (let j = LOGN - 1; j >= 0; j--) {
+                if (depth[u] - (1 << j) >= depth[v]) {
+                    maxDanger = Math.max(maxDanger, max_up[u][j]);
+                    u = parent[u][j];
+                }
+            }
+
+            // 3. If u == v (v was an ancestor)
+            if (u === v) {
+                return maxDanger;
+            }
+
+            // 4. Lift u and v together, tracking max danger
+            for (let j = LOGN - 1; j >= 0; j--) {
+                if (parent[u][j] !== 0 && parent[u][j] !== parent[v][j]) {
+                    maxDanger = Math.max(maxDanger, max_up[u][j]);
+                    maxDanger = Math.max(maxDanger, max_up[v][j]);
+                    u = parent[u][j];
+                    v = parent[v][j];
+                }
+            }
+
+            // 5. Add danger from last two edges (from u/v to the LCA)
+            maxDanger = Math.max(maxDanger, max_up[u][0]);
+            maxDanger = Math.max(maxDanger, max_up[v][0]);
+
+            return maxDanger;
+        }
+
+        /**
+         * @brief Gets the path and max danger EDGE for visualization. O(N) path trace.
+         * @returns {object} { pathEdges: array, maxDangerEdge: object }
+         */
+        function getPathAndMaxEdgeForVis(u, v) {
+            const lca = getLCA(u, v);
+            let pathEdges = [];
+            let maxDanger = 0;
+            let maxDangerEdge = null;
+
+            // Trace path from u to LCA
+            let curr = u;
+            while (curr !== lca) {
+                const p = parent[curr][0];
+                const danger = edge_map.get(`${curr}-${p}`);
+                pathEdges.push({ u: curr, v: p, danger: danger });
+                if (danger > maxDanger) {
+                    maxDanger = danger;
+                    maxDangerEdge = { u: curr, v: p };
+                }
+                curr = p;
+            }
+
+            // Trace path from v to LCA
+            curr = v;
+            while (curr !== lca) {
+                const p = parent[curr][0];
+                const danger = edge_map.get(`${curr}-${p}`);
+                pathEdges.push({ u: curr, v: p, danger: danger });
+                if (danger > maxDanger) {
+                    maxDanger = danger;
+                    maxDangerEdge = { u: curr, v: p };
+                }
+                curr = p;
+            }
+            
+            return { pathEdges, maxDangerEdge };
+        }
+        
+        /**
+         * @brief Processes all queries and updates results
+         */
+        function processQueries() {
+            const queriesText = queriesInput.value.trim();
+            if (!queriesText) {
+                resultsOutput.innerHTML = '<p class="text-gray-500">Enter some queries to see results.</p>';
+                return;
+            }
+
+            const queryLines = queriesText.split('\n');
+            let resultsHTML = '';
+            let firstPathEdges = null;
+            let firstMaxEdge = null;
+
+            queryLines.forEach((line, index) => {
+                const parts = line.trim().split(/\s+/).map(Number);
+                if (parts.length !== 2 || parts.some(isNaN)) {
+                    resultsHTML += `<p class="text-red-400">Invalid query: "${line}"</p>`;
+                    return;
+                }
+                
+                const [u, v] = parts;
+                if (u > nodeCount || v > nodeCount || u <= 0 || v <= 0) { // Use nodeCount
+                     resultsHTML += `<p class="text-red-400">Query nodes out of bounds: ${u}, ${v}</p>`;
+                     return;
+                }
+
+                // Get max danger in O(logN) for the result text
+                const maxDanger = getMaxDanger(u, v);
+                
+                resultsHTML += `<p class="text-gray-200">Path ${u} &harr; ${v}: <span class="font-bold text-amber-400">Max Danger = ${maxDanger}</span></p>`;
+                
+                // Save the first query's path for visualization
+                if (index === 0) {
+                    // Get path data (O(N)) only for the first query's visualization
+                    const { pathEdges, maxDangerEdge } = getPathAndMaxEdgeForVis(u, v);
+                    firstPathEdges = pathEdges;
+                    firstMaxEdge = maxDangerEdge;
+                }
+            });
+
+            resultsOutput.innerHTML = resultsHTML;
+            
+            // Highlight the first path found
+            if (firstPathEdges) {
+                highlightPath(firstPathEdges, firstMaxEdge);
+            }
+        }
+        
+        // --- D3 Visualization Functions ---
+
+        /**
+         * @brief Sets up the D3 SVG and simulation
+         */
+        function initVisualization() {
+            const width = vizContainer.clientWidth;
+            const height = vizContainer.clientHeight;
+
+            svg = d3.select("#visualization").append("svg")
+                .attr("width", width)
+                .attr("height", height)
+                .attr("viewBox", [-width / 2, -height / 2, width, height]);
+
+            // Create groups for links, nodes, and labels
+            linkG = svg.append("g").attr("class", "links");
+            labelG = svg.append("g").attr("class", "labels");
+            nodeG = svg.append("g").attr("class", "nodes");
+
+            simulation = d3.forceSimulation()
+                .force("link", d3.forceLink().id(d => d.id).distance(100).strength(0.5))
+                .force("charge", d3.forceManyBody().strength(-400))
+                .force("center", d3.forceCenter(0, 0))
+                .on("tick", ticked);
+        }
+
+        /**
+         * @brief (Re)draws the tree with new data
+         */
+        function drawTree() {
+            // --- Links ---
+            const links = linkG.selectAll("line")
+                .data(visLinks, d => `${d.source.id}-${d.target.id}`)
+                .join("line")
+                .attr("class", "link")
+                .attr("id", d => `edge-${d.source.id}-${d.target.id}`);
+
+            // --- Link Labels ---
+            const linkLabels = labelG.selectAll(".link-label")
+                .data(visLinks, d => `${d.source.id}-${d.target.id}`)
+                .join("text")
+                .attr("class", "link-label")
+                .text(d => d.danger);
+
+            // --- Nodes ---
+            const nodes = nodeG.selectAll("circle")
+                .data(visNodes, d => d.id)
+                .join("circle")
+                .attr("r", 6)
+                .attr("class", "node")
+                .attr("fill", "#1f2937") // bg-gray-800
+                .attr("id", d => `node-${d.id}`)
+                .call(drag(simulation)); // Enable dragging
+
+            // --- Node Labels ---
+            const nodeLabels = labelG.selectAll(".node-label")
+                .data(visNodes, d => d.id)
+                .join("text")
+                .attr("class", "node-label")
+                .text(d => d.id);
+
+            // Restart simulation
+            simulation.nodes(visNodes);
+            simulation.force("link").links(visLinks);
+            simulation.alpha(1).restart();
+        }
+
+        /**
+         * @brief D3 tick function to update positions
+         */
+        function ticked() {
+            linkG.selectAll("line")
+                .attr("x1", d => d.source.x)
+                .attr("y1", d => d.source.y)
+                .attr("x2", d => d.target.x)
+                .attr("y2", d => d.target.y);
+            
+            nodeG.selectAll("circle")
+                .attr("cx", d => d.x)
+                .attr("cy", d => d.y);
+                
+            labelG.selectAll(".node-label")
+                .attr("x", d => d.x)
+                .attr("y", d => d.y);
+                
+            labelG.selectAll(".link-label")
+                .attr("x", d => (d.source.x + d.target.x) / 2)
+                .attr("y", d => (d.source.y + d.target.y) / 2);
+        }
+        
+        /**
+         * @brief D3 drag helper
+         */
+        function drag(simulation) {
+            function dragstarted(event) {
+                if (!event.active) simulation.alphaTarget(0.3).restart();
+                event.subject.fx = event.subject.x;
+                event.subject.fy = event.subject.y;
+            }
+            function dragged(event) {
+                event.subject.fx = event.x;
+                event.subject.fy = event.y;
+            }
+            function dragended(event) {
+                if (!event.active) simulation.alphaTarget(0);
+                event.subject.fx = null;
+                event.subject.fy = null;
+            }
+            return d3.drag()
+                .on("start", dragstarted)
+                .on("drag", dragged)
+                .on("end", dragended);
+        }
+        
+        /**
+         * @brief Highlights the path from the first query
+         */
+        function highlightPath(pathEdges, maxDangerEdge) {
+            // 1. Reset all styles
+            svg.selectAll(".link").attr("class", "link");
+            svg.selectAll(".node").attr("class", "node").attr("fill", "#1f2937");
+
+            const pathNodeIds = new Set();
+            
+            // 2. Highlight path edges
+            pathEdges.forEach(edge => {
+                const { u, v } = edge;
+                pathNodeIds.add(u.toString());
+                pathNodeIds.add(v.toString());
+                
+                // Find the link (in either direction)
+                let link = svg.select(`#edge-${u}-${v}`);
+                if (link.empty()) {
+                    link = svg.select(`#edge-${v}-${u}`);
+                }
+                if (!link.empty()) {
+                    link.classed("path", true);
+                }
+            });
+
+            // 3. Highlight path nodes
+            pathNodeIds.forEach(id => {
+                svg.select(`#node-${id}`).classed("path-node", true);
+            });
+            
+            // 4. Emphasize max danger edge
+            if (maxDangerEdge) {
+                const { u, v } = maxDangerEdge;
+                let link = svg.select(`#edge-${u}-${v}`);
+                if (link.empty()) {
+                    link = svg.select(`#edge-${v}-${u}`);
+                }
+                if (!link.empty()) {
+                    link.classed("max-danger", true);
+                }
+            }
+        }
+        
+        // Handle window resizing
+        window.addEventListener('resize', () => {
+            const width = vizContainer.clientWidth;
+            const height = vizContainer.clientHeight;
+            svg.attr("width", width)
+               .attr("height", height)
+               .attr("viewBox", [-width / 2, -height / 2, width, height]);
+            simulation.force("center", d3.forceCenter(0, 0)).restart();
+        });
+
+    </script>
+</body>
+</html>
