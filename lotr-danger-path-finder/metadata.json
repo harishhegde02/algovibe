@@ -1,0 +1,5 @@
+{
+  "name": "LOTR Danger Path Finder",
+  "description": "An interactive tool to visualize paths in a tree-like map and identify the segment with the highest 'danger' level. Users can define a map using edges and weights, input multiple journey queries, and see the most dangerous part of each path highlighted on a dynamic, force-directed graph.",
+  "requestFramePermissions": []
+}
